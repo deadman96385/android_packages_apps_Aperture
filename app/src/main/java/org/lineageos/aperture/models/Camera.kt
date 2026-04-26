@@ -72,6 +72,20 @@ class Camera private constructor(
 
     val intrinsicZoomRatio = cameraInfo.intrinsicZoomRatio
 
+    private val availableAfModes = camera2CameraInfo.getCameraCharacteristic(
+        CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES
+    ) ?: IntArray(0)
+
+    /**
+     * Camera2 reports manual focus distance in diopters. 0 means infinity.
+     */
+    val maximumFocusDistance = camera2CameraInfo.getCameraCharacteristic(
+        CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE
+    ) ?: 0f
+
+    val supportsManualFocus = maximumFocusDistance > 0f &&
+            availableAfModes.contains(CameraMetadata.CONTROL_AF_MODE_OFF)
+
     private val imageCaptureCapabilities = ImageCapture.getImageCaptureCapabilities(cameraInfo)
 
     val supportedPhotoOutputFormats = imageCaptureCapabilities.supportedOutputFormats.map {

@@ -55,6 +55,22 @@ fun CaptureRequestOptions.Builder.setVideoStabilizationMode(
 )
 
 @androidx.camera.camera2.interop.ExperimentalCamera2Interop
+fun CaptureRequestOptions.Builder.setManualFocusDistance(
+    focusDistance: Float?
+) = setOrClearCaptureRequestOption(
+    CaptureRequest.LENS_FOCUS_DISTANCE,
+    focusDistance,
+)
+
+@androidx.camera.camera2.interop.ExperimentalCamera2Interop
+fun CaptureRequestOptions.Builder.setManualFocusAfMode(
+    focusDistance: Float?
+) = setOrClearCaptureRequestOption(
+    CaptureRequest.CONTROL_AF_MODE,
+    focusDistance?.let { CameraMetadata.CONTROL_AF_MODE_OFF },
+)
+
+@androidx.camera.camera2.interop.ExperimentalCamera2Interop
 fun CaptureRequestOptions.Builder.setEdgeMode(
     edgeMode: EdgeMode?
 ) = setOrClearCaptureRequestOption(

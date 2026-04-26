@@ -37,7 +37,6 @@ import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.ExperimentalZeroShutterLag
@@ -80,20 +79,11 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.lineageos.aperture.ext.camera2CameraControl
 import org.lineageos.aperture.ext.flashMode
 import org.lineageos.aperture.ext.mapToRange
 import org.lineageos.aperture.ext.px
 import org.lineageos.aperture.ext.scale
-import org.lineageos.aperture.ext.setColorCorrectionAberrationMode
-import org.lineageos.aperture.ext.setDistortionCorrectionMode
-import org.lineageos.aperture.ext.setEdgeMode
-import org.lineageos.aperture.ext.setFrameRate
-import org.lineageos.aperture.ext.setHotPixelMode
-import org.lineageos.aperture.ext.setNoiseReductionMode
 import org.lineageos.aperture.ext.setPadding
-import org.lineageos.aperture.ext.setShadingMode
-import org.lineageos.aperture.ext.setVideoStabilizationMode
 import org.lineageos.aperture.ext.slide
 import org.lineageos.aperture.ext.slideDown
 import org.lineageos.aperture.ext.smoothRotate
@@ -118,7 +108,6 @@ import org.lineageos.aperture.models.ThermalStatus
 import org.lineageos.aperture.models.TimerMode
 import org.lineageos.aperture.models.VideoDynamicRange
 import org.lineageos.aperture.models.VideoMirrorMode
-import org.lineageos.aperture.models.VideoStabilizationMode
 import org.lineageos.aperture.ui.dialogs.LocationPermissionsDialog
 import org.lineageos.aperture.ui.dialogs.QrBottomSheetDialog
 import org.lineageos.aperture.ui.views.CameraModeSelectorLayout
@@ -163,10 +152,12 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
     private val googleLensButton by lazy { findViewById<ImageButton>(R.id.googleLensButton) }
     private val gridButton by lazy { findViewById<Button>(R.id.gridButton) }
     private val gridView by lazy { findViewById<GridView>(R.id.gridView) }
+    private val focusLevel by lazy { findViewById<VerticalSlider>(R.id.focusLevel) }
     private val islandView by lazy { findViewById<IslandView>(R.id.islandView) }
     private val lensSelectorLayout by lazy { findViewById<LensSelectorLayout>(R.id.lensSelectorLayout) }
     private val levelerView by lazy { findViewById<LevelerView>(R.id.levelerView) }
     private val mainLayout by lazy { findViewById<ConstraintLayout>(R.id.mainLayout) }
+    private val manualFocusUnlockButton by lazy { findViewById<ImageButton>(R.id.manualFocusUnlockButton) }
     private val micButton by lazy { findViewById<Button>(R.id.micButton) }
     private val previewBlurView by lazy { findViewById<PreviewBlurView>(R.id.previewBlurView) }
     private val proButton by lazy { findViewById<ImageButton>(R.id.proButton) }
@@ -266,6 +257,10 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
 
                 MSG_HIDE_EXPOSURE_SLIDER -> {
                     exposureLevel.isVisible = false
+                }
+
+                MSG_HIDE_FOCUS_SLIDER -> {
+                    setManualFocusControlsVisible(false)
                 }
             }
         }
@@ -462,6 +457,12 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
             handler.removeMessages(MSG_HIDE_EXPOSURE_SLIDER)
             handler.sendMessageDelayed(handler.obtainMessage(MSG_HIDE_EXPOSURE_SLIDER), 2000)
 
+            if (viewModel.camera.replayCache.lastOrNull()?.supportsManualFocus == true) {
+                setManualFocusControlsVisible(true)
+                handler.removeMessages(MSG_HIDE_FOCUS_SLIDER)
+                handler.sendMessageDelayed(handler.obtainMessage(MSG_HIDE_FOCUS_SLIDER), 2000)
+            }
+
             secondaryTopBarLayout.slideDown()
         }
 
@@ -501,6 +502,19 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
 
             handler.removeMessages(MSG_HIDE_EXPOSURE_SLIDER)
             handler.sendMessageDelayed(handler.obtainMessage(MSG_HIDE_EXPOSURE_SLIDER), 2000)
+        }
+
+        // Set manual focus callback & unlock action
+        focusLevel.onProgressChangedByUser = {
+            viewModel.setManualFocusLevel(it)
+
+            handler.removeMessages(MSG_HIDE_FOCUS_SLIDER)
+            handler.sendMessageDelayed(handler.obtainMessage(MSG_HIDE_FOCUS_SLIDER), 2000)
+        }
+        manualFocusUnlockButton.setOnClickListener {
+            viewModel.unlockManualFocus()
+            setManualFocusControlsVisible(false)
+            handler.removeMessages(MSG_HIDE_FOCUS_SLIDER)
         }
 
         // Set primary bar button callbacks
@@ -887,7 +901,9 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
 
                 // Rotate sliders
                 exposureLevel.screenRotation = screenRotation
+                focusLevel.screenRotation = screenRotation
                 zoomLevel.screenRotation = screenRotation
+                manualFocusUnlockButton.smoothRotate(compensationValue)
 
                 // Rotate info chip
                 islandView.setScreenRotation(screenRotation)
@@ -1139,6 +1155,33 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                         false -> EXPOSURE_LEVEL_FORMATTER.format(ev).toString()
                     }
                 }
+            }
+        }
+
+        launch {
+            viewModel.manualFocusDistanceRangeToLevel.collectLatest { manualFocusLevel ->
+                focusLevel.progress = manualFocusLevel.sliderLevel
+                focusLevel.textFormatter = {
+                    viewModel.manualFocusLevelToDisplayValue(it).toString()
+                }
+
+                if (manualFocusLevel.maximumDistance <= 0f) {
+                    setManualFocusControlsVisible(false)
+                }
+            }
+        }
+
+        launch {
+            viewModel.camera.collectLatest { camera ->
+                if (!camera.supportsManualFocus) {
+                    setManualFocusControlsVisible(false)
+                }
+            }
+        }
+
+        launch {
+            viewModel.isManualFocusLocked.collectLatest {
+                setManualFocusControlsVisible(focusLevel.isVisible)
             }
         }
 
@@ -1613,40 +1656,8 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         lifecycleScope.launch {
             viewModel.cameraController.initializationFuture.await()
 
-            val camera2CameraControl = viewModel.cameraController.camera2CameraControl ?: run {
-                Log.wtf(LOG_TAG, "Camera2CameraControl not available even with camera ready?")
-                return@launch
-            }
-
-            val camera2Options = cameraConfiguration.camera2Options
-
             // Set Camera2 CaptureRequest options
-            camera2CameraControl.captureRequestOptions = CaptureRequestOptions.Builder()
-                .setFrameRate(
-                    when (cameraConfiguration) {
-                        is CameraConfiguration.Video -> cameraConfiguration.videoFrameRate
-                        else -> null
-                    }
-                )
-                .setVideoStabilizationMode(
-                    when (cameraConfiguration) {
-                        is CameraConfiguration.Video -> when (
-                            cameraConfiguration.enableVideoStabilization
-                        ) {
-                            true -> VideoStabilizationMode.getMode(cameraConfiguration.camera)
-                            false -> null
-                        }
-
-                        else -> null
-                    } ?: VideoStabilizationMode.OFF
-                )
-                .setEdgeMode(camera2Options.edgeMode)
-                .setNoiseReductionMode(camera2Options.noiseReductionMode)
-                .setShadingMode(camera2Options.shadingMode)
-                .setColorCorrectionAberrationMode(camera2Options.colorCorrectionAberrationMode)
-                .setDistortionCorrectionMode(camera2Options.distortionCorrectionMode)
-                .setHotPixelMode(camera2Options.hotPixelMode)
-                .build()
+            viewModel.applyCamera2CaptureRequestOptions(cameraConfiguration)
         }
 
         // Restore settings that can be set on the fly
@@ -1933,6 +1944,13 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         }
     }
 
+    private fun setManualFocusControlsVisible(visible: Boolean) {
+        val supported = viewModel.camera.replayCache.lastOrNull()?.supportsManualFocus == true
+        val locked = viewModel.isManualFocusLocked.value
+        focusLevel.isVisible = visible && supported
+        manualFocusUnlockButton.isVisible = visible && supported && locked
+    }
+
     private fun handleHardwareKeyDown(
         keyCode: Int, event: KeyEvent?
     ) = HardwareKey.match(keyCode)?.let { (hardwareKey, tempIncrease) ->
@@ -2067,6 +2085,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         private const val MSG_HIDE_FOCUS_RING = 1
         private const val MSG_HIDE_EXPOSURE_SLIDER = 2
         private const val MSG_ON_PINCH_TO_ZOOM = 3
+        private const val MSG_HIDE_FOCUS_SLIDER = 4
 
         // We need to return something small enough so as not to overwhelm Binder. 1MB is the
         // per-process limit across all transactions. Camera2 sets a max pixel count of 51200.
