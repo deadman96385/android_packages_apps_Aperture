@@ -1163,7 +1163,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                 focusLevel.allowedProgressRange = manualFocusLevel.allowedProgressRange
                 focusLevel.progress = manualFocusLevel.sliderLevel
                 focusLevel.textFormatter = {
-                    viewModel.manualFocusLevelToDisplayValue(it).toString()
+                    viewModel.manualFocusLevelToDisplayText(it)
                 }
 
                 if (manualFocusLevel.maximumDistance <= 0f) {

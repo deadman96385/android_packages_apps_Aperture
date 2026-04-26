@@ -112,6 +112,7 @@ import org.lineageos.aperture.utils.StorageUtils
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -1671,12 +1672,17 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
         }
     }
 
-    fun manualFocusLevelToDisplayValue(manualFocusLevel: Float): Int {
+    fun manualFocusLevelToDisplayText(manualFocusLevel: Float): String {
         require(manualFocusLevel in 0f..1f) {
             "Manual focus level must be between 0 and 1, got $manualFocusLevel"
         }
 
-        return (manualFocusLevel * MANUAL_FOCUS_DISPLAY_MAX).roundToInt()
+        val maximumFocusDistance = maximumFocusDistance.replayCache.lastOrNull() ?: return ""
+        val focusDistance = maximumFocusDistance * displayLevelToFocusDistance(
+            1f - manualFocusLevel
+        )
+
+        return formatFocusDistance(focusDistance)
     }
 
     fun unlockManualFocus() {
@@ -1905,6 +1911,19 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
     private fun displayLevelToFocusDistance(displayLevel: Float): Float {
         return ((exp(displayLevel * FOCUS_DISTANCE_LOG_BASE) - 1f) / FOCUS_DISTANCE_LOG_CURVE)
             .coerceIn(0f, 1f)
+    }
+
+    private fun formatFocusDistance(focusDistance: Float): String {
+        if (focusDistance <= 0f) {
+            return "∞"
+        }
+
+        val meters = 1f / focusDistance
+        return when {
+            meters < 1f -> "${(meters * 100).roundToInt()}cm"
+            meters < 10f -> String.format(Locale.US, "%.1fm", meters)
+            else -> "${meters.roundToInt()}m"
+        }
     }
 
     private fun focusDistanceToProgressRange(
@@ -2203,7 +2222,6 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
 
         private const val SINGLE_CAPTURE_PHOTO_BUFFER_INITIAL_SIZE_BYTES = 8 * 1024 * 1024 // 8 MiB
 
-        private const val MANUAL_FOCUS_DISPLAY_MAX = 100
         private const val FOCUS_DISTANCE_LOG_CURVE = 100f
         private val FOCUS_DISTANCE_LOG_BASE = ln(1f + FOCUS_DISTANCE_LOG_CURVE)
 
