@@ -37,6 +37,12 @@ abstract class Slider @JvmOverloads constructor(
         strokeWidth = 2F
     }
 
+    private val disabledTrackPaint = Paint().apply {
+        style = Paint.Style.FILL
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
+        color = Color.argb(170, 48, 48, 48)
+    }
+
     private val thumbPaint = Paint().apply {
         style = Paint.Style.FILL
         xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC)
@@ -53,6 +59,15 @@ abstract class Slider @JvmOverloads constructor(
             invalidate()
         }
     var onProgressChangedByUser: ((value: Float) -> Unit)? = null
+
+    var allowedProgressRange: ClosedFloatingPointRange<Float> = 0f..1f
+        set(value) {
+            val start = value.start.coerceIn(0f, 1f)
+            val end = value.endInclusive.coerceIn(start, 1f)
+            field = start..end
+            progress = progress.coerceIn(field)
+            invalidate()
+        }
 
     var textFormatter: (value: Float) -> String = {
         "%.01f".format(it)
@@ -126,8 +141,22 @@ abstract class Slider @JvmOverloads constructor(
         // Draw round rect
         canvas.drawRoundRect(track, trackRadius, trackRadius, trackPaint)
 
+        drawDisabledTrack(canvas, track, trackRadius)
+
         // Draw border
         canvas.drawRoundRect(track, trackRadius, trackRadius, trackBorderPaint)
+    }
+
+    protected fun clampProgress(progress: Float) = progress
+        .coerceIn(0f, 1f)
+        .coerceIn(allowedProgressRange)
+
+    protected open fun disabledTrackSegments(track: RectF): List<RectF> = emptyList()
+
+    private fun drawDisabledTrack(canvas: Canvas, track: RectF, trackRadius: Float) {
+        disabledTrackSegments(track).forEach {
+            canvas.drawRoundRect(it, trackRadius, trackRadius, disabledTrackPaint)
+        }
     }
 
     abstract fun thumb(): Triple<Float, Float, Float>

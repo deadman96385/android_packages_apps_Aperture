@@ -1160,6 +1160,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
 
         launch {
             viewModel.manualFocusDistanceRangeToLevel.collectLatest { manualFocusLevel ->
+                focusLevel.allowedProgressRange = manualFocusLevel.allowedProgressRange
                 focusLevel.progress = manualFocusLevel.sliderLevel
                 focusLevel.textFormatter = {
                     viewModel.manualFocusLevelToDisplayValue(it).toString()
@@ -1503,6 +1504,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         previewBlurView.isVisible = true
 
         // Unbind previous use cases
+        viewModel.unregisterActivePhysicalCameraListener()
         viewModel.cameraController.unbind()
 
         // Hide grid until preview is ready
@@ -1655,6 +1657,8 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         // Wait for camera to be ready
         lifecycleScope.launch {
             viewModel.cameraController.initializationFuture.await()
+
+            viewModel.registerActivePhysicalCameraListener()
 
             // Set Camera2 CaptureRequest options
             viewModel.applyCamera2CaptureRequestOptions(cameraConfiguration)

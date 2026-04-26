@@ -10,6 +10,8 @@ import android.app.Application
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.ImageFormat
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.location.LocationManager
 import android.net.Uri
 import android.os.BatteryManager
@@ -108,6 +110,8 @@ import org.lineageos.aperture.repositories.CameraRepository
 import org.lineageos.aperture.utils.CameraSoundsUtils
 import org.lineageos.aperture.utils.StorageUtils
 import java.io.ByteArrayOutputStream
+import java.lang.reflect.Method
+import java.lang.reflect.Proxy
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -607,6 +611,9 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
      */
     private val manualFocusDistance = MutableStateFlow<Float?>(null)
 
+    private val activePhysicalCameraId = MutableStateFlow<String?>(null)
+    private var activePhysicalCameraListenerRegistration: ActivePhysicalCameraListenerRegistration? = null
+
     val isManualFocusLocked = manualFocusDistance
         .map { it != null }
         .stateIn(
@@ -617,7 +624,23 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val maximumFocusDistance = cameraConfiguration
-        .mapLatest { it.camera.maximumFocusDistance }
+        .mapLatest { it.camera.maximumPhysicalFocusDistance }
+        .flowOn(Dispatchers.IO)
+        .shareIn(
+            viewModelScope,
+            started = SharingStarted.WhileSubscribed(),
+            replay = 1
+        )
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val activeMaximumFocusDistance = combine(
+        cameraConfiguration,
+        activePhysicalCameraId,
+    ) { cameraConfiguration, activePhysicalCameraId ->
+        activePhysicalCameraId?.let {
+            cameraConfiguration.camera.physicalFocusDistanceRanges[it]?.maximumDistance
+        } ?: cameraConfiguration.camera.maximumPhysicalFocusDistance
+    }
         .flowOn(Dispatchers.IO)
         .shareIn(
             viewModelScope,
@@ -628,7 +651,8 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
     val manualFocusDistanceRangeToLevel = combine(
         manualFocusDistance,
         maximumFocusDistance,
-    ) { manualFocusDistance, maximumFocusDistance ->
+        activeMaximumFocusDistance,
+    ) { manualFocusDistance, maximumFocusDistance, activeMaximumFocusDistance ->
         val displayLevel = when (maximumFocusDistance > 0f) {
             true -> 1f - focusDistanceToDisplayLevel(
                 (manualFocusDistance ?: 0f) / maximumFocusDistance
@@ -638,6 +662,10 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
 
         ManualFocusLevel(
             maximumDistance = maximumFocusDistance,
+            allowedProgressRange = focusDistanceToProgressRange(
+                maximumFocusDistance,
+                activeMaximumFocusDistance,
+            ),
             sliderLevel = displayLevel,
         )
     }
@@ -1056,6 +1084,7 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
             cameraMode = cameraMode,
         )
 
+        activePhysicalCameraId.value = null
         _cameraConfiguration.value = cameraConfiguration
 
         return true
@@ -1102,7 +1131,18 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
             null
         }
 
-        val imageOutputFormat = cameraController.imageOutputFormat
+        val imageOutputFormat = when (
+            val cameraConfiguration = _cameraConfiguration.value
+        ) {
+            is CameraConfiguration.Photo -> when (cameraConfiguration.photoOutputFormat) {
+                PhotoOutputFormat.JPEG -> ImageCapture.OUTPUT_FORMAT_JPEG
+                PhotoOutputFormat.JPEG_ULTRA_HDR -> ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR
+                PhotoOutputFormat.RAW -> ImageCapture.OUTPUT_FORMAT_RAW
+                PhotoOutputFormat.RAW_JPEG -> ImageCapture.OUTPUT_FORMAT_RAW_JPEG
+            }
+
+            else -> cameraController.imageOutputFormat
+        }
 
         val mimeType = when (imageOutputFormat) {
             ImageCapture.OUTPUT_FORMAT_JPEG,
@@ -1616,8 +1656,15 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
             return
         }
 
+        val clampedManualFocusLevel = manualFocusLevel.coerceIn(
+            focusDistanceToProgressRange(
+                maxDistance,
+                activeMaximumFocusDistance.replayCache.lastOrNull() ?: maxDistance,
+            )
+        )
+
         manualFocusDistance.value = maxDistance * displayLevelToFocusDistance(
-            1f - manualFocusLevel
+            1f - clampedManualFocusLevel
         )
         _cameraConfiguration.value?.let {
             applyCamera2CaptureRequestOptions(it)
@@ -1639,6 +1686,91 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
             applyCamera2CaptureRequestOptions(it)
         }
         cameraController.cameraControl?.cancelFocusAndMetering()
+    }
+
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+    fun registerActivePhysicalCameraListener() {
+        unregisterActivePhysicalCameraListener()
+
+        val camera2CameraControl = cameraController.camera2CameraControl ?: return
+
+        try {
+            val camera2CameraControlImpl = camera2CameraControl.javaClass
+                .getDeclaredField("mCamera2CameraControlImpl")
+                .apply { isAccessible = true }
+                .get(camera2CameraControl) ?: return
+            val listenerClass = Class.forName(
+                "androidx.camera.camera2.internal.Camera2CameraControlImpl\$CaptureResultListener"
+            )
+            val listener = Proxy.newProxyInstance(
+                listenerClass.classLoader,
+                arrayOf(listenerClass),
+            ) { proxy, method, args ->
+                when (method.name) {
+                    "onCaptureResult" -> {
+                        (args?.firstOrNull() as? TotalCaptureResult)?.let {
+                            onCaptureResult(it)
+                        }
+                        false
+                    }
+
+                    "equals" -> proxy === args?.firstOrNull()
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "toString" -> "ActivePhysicalCameraCaptureResultListener"
+                    else -> null
+                }
+            }
+            val addCaptureResultListener = camera2CameraControlImpl.javaClass
+                .getDeclaredMethod("addCaptureResultListener", listenerClass)
+                .apply { isAccessible = true }
+            val removeCaptureResultListener = camera2CameraControlImpl.javaClass
+                .getDeclaredMethod("removeCaptureResultListener", listenerClass)
+                .apply { isAccessible = true }
+
+            addCaptureResultListener.invoke(camera2CameraControlImpl, listener)
+            activePhysicalCameraListenerRegistration = ActivePhysicalCameraListenerRegistration(
+                camera2CameraControlImpl,
+                listener,
+                removeCaptureResultListener,
+            )
+        } catch (e: ReflectiveOperationException) {
+            Log.w(LOG_TAG, "Unable to observe active physical camera ID", e)
+        } catch (e: SecurityException) {
+            Log.w(LOG_TAG, "Unable to observe active physical camera ID", e)
+        }
+    }
+
+    fun unregisterActivePhysicalCameraListener() {
+        activePhysicalCameraListenerRegistration?.let {
+            try {
+                it.removeCaptureResultListener.invoke(it.camera2CameraControlImpl, it.listener)
+            } catch (e: ReflectiveOperationException) {
+                Log.w(LOG_TAG, "Unable to remove active physical camera ID listener", e)
+            } catch (e: SecurityException) {
+                Log.w(LOG_TAG, "Unable to remove active physical camera ID listener", e)
+            }
+        }
+        activePhysicalCameraListenerRegistration = null
+        activePhysicalCameraId.value = null
+    }
+
+    fun onCaptureResult(captureResult: CaptureResult) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return
+        }
+
+        val activePhysicalId = captureResult.get(
+            CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID
+        )
+        val supportedActivePhysicalId = activePhysicalId?.takeIf {
+            _cameraConfiguration.value?.camera?.physicalFocusDistanceRanges?.containsKey(it) == true
+        }
+        if (activePhysicalCameraId.value == supportedActivePhysicalId) {
+            return
+        }
+
+        activePhysicalCameraId.value = supportedActivePhysicalId
+        clampManualFocusToActiveRange()
     }
 
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
@@ -1775,9 +1907,50 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
             .coerceIn(0f, 1f)
     }
 
+    private fun focusDistanceToProgressRange(
+        maximumFocusDistance: Float,
+        activeMaximumFocusDistance: Float,
+    ): ClosedFloatingPointRange<Float> {
+        if (maximumFocusDistance <= 0f || activeMaximumFocusDistance >= maximumFocusDistance) {
+            return 0f..1f
+        }
+        if (activeMaximumFocusDistance <= 0f) {
+            return 1f..1f
+        }
+
+        val minimumProgress = 1f - focusDistanceToDisplayLevel(
+            activeMaximumFocusDistance / maximumFocusDistance
+        )
+        return minimumProgress..1f
+    }
+
+    private fun clampManualFocusToActiveRange() {
+        val manualFocusDistance = manualFocusDistance.value ?: return
+        val camera = _cameraConfiguration.value?.camera ?: return
+        val activeMaximumFocusDistance = activePhysicalCameraId.value?.let {
+            camera.physicalFocusDistanceRanges[it]?.maximumDistance
+        } ?: camera.maximumPhysicalFocusDistance
+
+        if (manualFocusDistance <= activeMaximumFocusDistance) {
+            return
+        }
+
+        this.manualFocusDistance.value = activeMaximumFocusDistance
+        _cameraConfiguration.value?.let {
+            applyCamera2CaptureRequestOptions(it)
+        }
+    }
+
     data class ManualFocusLevel(
         val maximumDistance: Float,
+        val allowedProgressRange: ClosedFloatingPointRange<Float>,
         val sliderLevel: Float,
+    )
+
+    private data class ActivePhysicalCameraListenerRegistration(
+        val camera2CameraControlImpl: Any,
+        val listener: Any,
+        val removeCaptureResultListener: Method,
     )
 
     /**
@@ -2015,6 +2188,7 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
                 val newCameraConfiguration = block(it)
 
                 manualFocusDistance.value = null
+                activePhysicalCameraId.value = null
                 _cameraConfiguration.value = newCameraConfiguration
 
                 true

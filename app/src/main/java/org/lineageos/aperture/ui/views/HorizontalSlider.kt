@@ -26,6 +26,21 @@ class HorizontalSlider @JvmOverloads constructor(
         return RectF(left, top, right, bottom)
     }
 
+    override fun disabledTrackSegments(track: RectF): List<RectF> = buildList {
+        val min = allowedProgressRange.start
+        val max = allowedProgressRange.endInclusive
+        val minX = progressToX(track, min)
+        val maxX = progressToX(track, max)
+
+        if (min > 0f) {
+            add(RectF(track.left, track.top, minX, track.bottom))
+        }
+        if (max < 1f) {
+            add(RectF(maxX, track.top, track.right, track.bottom))
+        }
+    }
+
+
     override fun thumb(): Triple<Float, Float, Float> {
         val track = track()
         val trackWidth = track.width()
@@ -53,11 +68,15 @@ class HorizontalSlider @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN,
             MotionEvent.ACTION_MOVE,
             MotionEvent.ACTION_UP -> {
-                progress = event.x.coerceIn(0f, width.toFloat()) / width
+                progress = clampProgress(event.x.coerceIn(0f, width.toFloat()) / width)
                 onProgressChangedByUser?.invoke(progress)
             }
         }
 
         return true
+    }
+
+    private fun progressToX(track: RectF, progress: Float): Float {
+        return (track.width() * progress) + track.left
     }
 }

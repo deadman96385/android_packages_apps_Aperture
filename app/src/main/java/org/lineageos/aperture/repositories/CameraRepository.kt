@@ -135,6 +135,7 @@ class CameraRepository(
     private fun List<CameraInfo>.mapToCamera() = map { it.toCamera() }.sortedBy { it.cameraId }
 
     private fun CameraInfo.toCamera() = Camera.fromCameraX(
+        context,
         this,
         extensionsManager,
         overlaysRepository,

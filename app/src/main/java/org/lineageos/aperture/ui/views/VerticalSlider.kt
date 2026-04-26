@@ -26,7 +26,9 @@ class VerticalSlider @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN,
             MotionEvent.ACTION_MOVE,
             MotionEvent.ACTION_UP -> {
-                progress = (height - event.y.coerceIn(0f, height.toFloat())) / height
+                progress = clampProgress(
+                    (height - event.y.coerceIn(0f, height.toFloat())) / height
+                )
                 onProgressChangedByUser?.invoke(progress)
             }
         }
@@ -46,6 +48,20 @@ class VerticalSlider @JvmOverloads constructor(
         return RectF(left, top, right, bottom)
     }
 
+    override fun disabledTrackSegments(track: RectF): List<RectF> = buildList {
+        val min = allowedProgressRange.start
+        val max = allowedProgressRange.endInclusive
+        val minY = progressToY(track, min)
+        val maxY = progressToY(track, max)
+
+        if (min > 0f) {
+            add(RectF(track.left, minY, track.right, track.bottom))
+        }
+        if (max < 1f) {
+            add(RectF(track.left, track.top, track.right, maxY))
+        }
+    }
+
     override fun thumb(): Triple<Float, Float, Float> {
         val track = track()
         val trackHeight = track.height()
@@ -59,5 +75,9 @@ class VerticalSlider @JvmOverloads constructor(
         }
 
         return Triple(cx, cy, width / 2.15f)
+    }
+
+    private fun progressToY(track: RectF, progress: Float): Float {
+        return (track.height() - (track.height() * progress)) + track.top
     }
 }
