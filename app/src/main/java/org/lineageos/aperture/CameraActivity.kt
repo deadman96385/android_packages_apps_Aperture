@@ -37,17 +37,23 @@ import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.ExperimentalZeroShutterLag
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MirrorMode
+import androidx.camera.core.Preview
+import androidx.camera.core.SessionConfig
+import androidx.camera.core.UseCase
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.CameraController
 import androidx.camera.view.PreviewView
@@ -80,20 +86,11 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.lineageos.aperture.ext.camera2CameraControl
 import org.lineageos.aperture.ext.flashMode
 import org.lineageos.aperture.ext.mapToRange
 import org.lineageos.aperture.ext.px
 import org.lineageos.aperture.ext.scale
-import org.lineageos.aperture.ext.setColorCorrectionAberrationMode
-import org.lineageos.aperture.ext.setDistortionCorrectionMode
-import org.lineageos.aperture.ext.setEdgeMode
-import org.lineageos.aperture.ext.setFrameRate
-import org.lineageos.aperture.ext.setHotPixelMode
-import org.lineageos.aperture.ext.setNoiseReductionMode
 import org.lineageos.aperture.ext.setPadding
-import org.lineageos.aperture.ext.setShadingMode
-import org.lineageos.aperture.ext.setVideoStabilizationMode
 import org.lineageos.aperture.ext.slide
 import org.lineageos.aperture.ext.slideDown
 import org.lineageos.aperture.ext.smoothRotate
@@ -118,7 +115,6 @@ import org.lineageos.aperture.models.ThermalStatus
 import org.lineageos.aperture.models.TimerMode
 import org.lineageos.aperture.models.VideoDynamicRange
 import org.lineageos.aperture.models.VideoMirrorMode
-import org.lineageos.aperture.models.VideoStabilizationMode
 import org.lineageos.aperture.ui.dialogs.LocationPermissionsDialog
 import org.lineageos.aperture.ui.dialogs.QrBottomSheetDialog
 import org.lineageos.aperture.ui.views.CameraModeSelectorLayout
@@ -163,10 +159,12 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
     private val googleLensButton by lazy { findViewById<ImageButton>(R.id.googleLensButton) }
     private val gridButton by lazy { findViewById<Button>(R.id.gridButton) }
     private val gridView by lazy { findViewById<GridView>(R.id.gridView) }
+    private val focusLevel by lazy { findViewById<VerticalSlider>(R.id.focusLevel) }
     private val islandView by lazy { findViewById<IslandView>(R.id.islandView) }
     private val lensSelectorLayout by lazy { findViewById<LensSelectorLayout>(R.id.lensSelectorLayout) }
     private val levelerView by lazy { findViewById<LevelerView>(R.id.levelerView) }
     private val mainLayout by lazy { findViewById<ConstraintLayout>(R.id.mainLayout) }
+    private val manualFocusUnlockButton by lazy { findViewById<ImageButton>(R.id.manualFocusUnlockButton) }
     private val micButton by lazy { findViewById<Button>(R.id.micButton) }
     private val previewBlurView by lazy { findViewById<PreviewBlurView>(R.id.previewBlurView) }
     private val proButton by lazy { findViewById<ImageButton>(R.id.proButton) }
@@ -266,6 +264,10 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
 
                 MSG_HIDE_EXPOSURE_SLIDER -> {
                     exposureLevel.isVisible = false
+                }
+
+                MSG_HIDE_FOCUS_SLIDER -> {
+                    setManualFocusControlsVisible(false)
                 }
             }
         }
@@ -462,6 +464,12 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
             handler.removeMessages(MSG_HIDE_EXPOSURE_SLIDER)
             handler.sendMessageDelayed(handler.obtainMessage(MSG_HIDE_EXPOSURE_SLIDER), 2000)
 
+            if (viewModel.camera.replayCache.lastOrNull()?.supportsManualFocus == true) {
+                setManualFocusControlsVisible(true)
+                handler.removeMessages(MSG_HIDE_FOCUS_SLIDER)
+                handler.sendMessageDelayed(handler.obtainMessage(MSG_HIDE_FOCUS_SLIDER), 2000)
+            }
+
             secondaryTopBarLayout.slideDown()
         }
 
@@ -501,6 +509,19 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
 
             handler.removeMessages(MSG_HIDE_EXPOSURE_SLIDER)
             handler.sendMessageDelayed(handler.obtainMessage(MSG_HIDE_EXPOSURE_SLIDER), 2000)
+        }
+
+        // Set manual focus callback & unlock action
+        focusLevel.onProgressChangedByUser = {
+            viewModel.setManualFocusLevel(it)
+
+            handler.removeMessages(MSG_HIDE_FOCUS_SLIDER)
+            handler.sendMessageDelayed(handler.obtainMessage(MSG_HIDE_FOCUS_SLIDER), 2000)
+        }
+        manualFocusUnlockButton.setOnClickListener {
+            viewModel.unlockManualFocus()
+            setManualFocusControlsVisible(false)
+            handler.removeMessages(MSG_HIDE_FOCUS_SLIDER)
         }
 
         // Set primary bar button callbacks
@@ -887,7 +908,9 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
 
                 // Rotate sliders
                 exposureLevel.screenRotation = screenRotation
+                focusLevel.screenRotation = screenRotation
                 zoomLevel.screenRotation = screenRotation
+                manualFocusUnlockButton.smoothRotate(compensationValue)
 
                 // Rotate info chip
                 islandView.setScreenRotation(screenRotation)
@@ -1139,6 +1162,34 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                         false -> EXPOSURE_LEVEL_FORMATTER.format(ev).toString()
                     }
                 }
+            }
+        }
+
+        launch {
+            viewModel.manualFocusDistanceRangeToLevel.collectLatest { manualFocusLevel ->
+                focusLevel.allowedProgressRange = manualFocusLevel.allowedProgressRange
+                focusLevel.progress = manualFocusLevel.sliderLevel
+                focusLevel.textFormatter = {
+                    viewModel.manualFocusLevelToDisplayText(it)
+                }
+
+                if (manualFocusLevel.maximumDistance <= 0f) {
+                    setManualFocusControlsVisible(false)
+                }
+            }
+        }
+
+        launch {
+            viewModel.camera.collectLatest { camera ->
+                if (!camera.supportsManualFocus) {
+                    setManualFocusControlsVisible(false)
+                }
+            }
+        }
+
+        launch {
+            viewModel.isManualFocusLocked.collectLatest {
+                setManualFocusControlsVisible(focusLevel.isVisible)
             }
         }
 
@@ -1460,6 +1511,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         previewBlurView.isVisible = true
 
         // Unbind previous use cases
+        viewModel.resetActivePhysicalCamera()
         viewModel.cameraController.unbind()
 
         // Hide grid until preview is ready
@@ -1483,8 +1535,18 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
             }) not supported by camera ${cameraConfiguration.camera.cameraId}"
         }
 
-        // Initialize the use case we want and set its properties
-        val cameraUseCases = when (cameraConfiguration) {
+        // Build the Preview use case with a session capture callback so we can observe the
+        // active physical camera ID without reflection.
+        val preview = Preview.Builder()
+            .also {
+                Camera2Interop.Extender(it).setSessionCaptureCallback(
+                    viewModel.physicalCameraCaptureCallback
+                )
+            }
+            .build()
+
+        // Build the secondary use case for the requested camera mode.
+        val secondaryUseCase: UseCase = when (cameraConfiguration) {
             is CameraConfiguration.Photo -> {
                 require(
                     cameraConfiguration.photoCaptureMode != ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
@@ -1503,35 +1565,35 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                     } not supported by camera ${cameraConfiguration.camera.cameraId})"
                 }
 
-                viewModel.cameraController.imageCaptureMode = cameraConfiguration.photoCaptureMode
-
-                viewModel.cameraController.imageOutputFormat = when (
-                    cameraConfiguration.photoOutputFormat
-                ) {
-                    PhotoOutputFormat.JPEG -> ImageCapture.OUTPUT_FORMAT_JPEG
-                    PhotoOutputFormat.JPEG_ULTRA_HDR -> ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR
-                    PhotoOutputFormat.RAW -> ImageCapture.OUTPUT_FORMAT_RAW
-                    PhotoOutputFormat.RAW_JPEG -> ImageCapture.OUTPUT_FORMAT_RAW_JPEG
-                }
-
-                viewModel.cameraController.imageCaptureResolutionSelector =
-                    ResolutionSelector.Builder()
-                        .setAspectRatioStrategy(
-                            AspectRatioStrategy(
-                                cameraConfiguration.photoAspectRatio,
-                                AspectRatioStrategy.FALLBACK_RULE_AUTO,
+                ImageCapture.Builder()
+                    .setCaptureMode(cameraConfiguration.photoCaptureMode)
+                    .setOutputFormat(
+                        when (cameraConfiguration.photoOutputFormat) {
+                            PhotoOutputFormat.JPEG -> ImageCapture.OUTPUT_FORMAT_JPEG
+                            PhotoOutputFormat.JPEG_ULTRA_HDR ->
+                                ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR
+                            PhotoOutputFormat.RAW -> ImageCapture.OUTPUT_FORMAT_RAW
+                            PhotoOutputFormat.RAW_JPEG -> ImageCapture.OUTPUT_FORMAT_RAW_JPEG
+                        }
+                    )
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setAspectRatioStrategy(
+                                AspectRatioStrategy(
+                                    cameraConfiguration.photoAspectRatio,
+                                    AspectRatioStrategy.FALLBACK_RULE_AUTO,
+                                )
                             )
-                        )
-                        .setAllowedResolutionMode(
-                            if (cameraConfiguration.enableHighResolution) {
-                                ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE
-                            } else {
-                                ResolutionSelector.PREFER_CAPTURE_RATE_OVER_HIGHER_RESOLUTION
-                            }
-                        )
-                        .build()
-
-                CameraController.IMAGE_CAPTURE
+                            .setAllowedResolutionMode(
+                                if (cameraConfiguration.enableHighResolution) {
+                                    ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE
+                                } else {
+                                    ResolutionSelector.PREFER_CAPTURE_RATE_OVER_HIGHER_RESOLUTION
+                                }
+                            )
+                            .build()
+                    )
+                    .build()
             }
 
             is CameraConfiguration.Video -> {
@@ -1556,36 +1618,31 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                     "Video dynamic range not supported with the requested video quality"
                 }
 
-                // Set the quality
-                viewModel.cameraController.videoCaptureQualitySelector =
-                    QualitySelector.from(cameraConfiguration.videoQuality)
+                val recorder = Recorder.Builder()
+                    .setQualitySelector(QualitySelector.from(cameraConfiguration.videoQuality))
+                    .build()
 
-                // Set the dynamic range
-                viewModel.cameraController.videoCaptureDynamicRange =
-                    cameraConfiguration.videoDynamicRange.dynamicRange
-
-                // Set video mirror mode
-                viewModel.cameraController.videoCaptureMirrorMode =
-                    when (cameraConfiguration.videoMirrorMode) {
-                        VideoMirrorMode.OFF -> MirrorMode.MIRROR_MODE_OFF
-                        VideoMirrorMode.ON -> MirrorMode.MIRROR_MODE_ON
-                        VideoMirrorMode.ON_FFC_ONLY -> when (
-                            cameraConfiguration.camera.cameraFacing
-                        ) {
-                            CameraFacing.FRONT -> MirrorMode.MIRROR_MODE_ON
-                            else -> MirrorMode.MIRROR_MODE_OFF
+                VideoCapture.Builder(recorder)
+                    .setDynamicRange(cameraConfiguration.videoDynamicRange.dynamicRange)
+                    .setMirrorMode(
+                        when (cameraConfiguration.videoMirrorMode) {
+                            VideoMirrorMode.OFF -> MirrorMode.MIRROR_MODE_OFF
+                            VideoMirrorMode.ON -> MirrorMode.MIRROR_MODE_ON
+                            VideoMirrorMode.ON_FFC_ONLY -> when (
+                                cameraConfiguration.camera.cameraFacing
+                            ) {
+                                CameraFacing.FRONT -> MirrorMode.MIRROR_MODE_ON
+                                else -> MirrorMode.MIRROR_MODE_OFF
+                            }
                         }
-                    }
-
-                CameraController.VIDEO_CAPTURE
+                    )
+                    .build()
             }
 
             is CameraConfiguration.Qr -> {
-                viewModel.cameraController.setImageAnalysisAnalyzer(
-                    viewModel.cameraExecutor, viewModel.qrImageAnalyzer
-                )
-
-                CameraController.IMAGE_ANALYSIS
+                ImageAnalysis.Builder().build().apply {
+                    setAnalyzer(viewModel.cameraExecutor, viewModel.qrImageAnalyzer)
+                }
             }
         }
 
@@ -1603,8 +1660,10 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         }
 
         // Bind use cases to camera
-        viewModel.cameraController.cameraSelector = cameraSelector
-        viewModel.cameraController.setEnabledUseCases(cameraUseCases)
+        viewModel.cameraController.setSessionConfig(
+            SessionConfig(preview, secondaryUseCase),
+            cameraSelector,
+        )
 
         // Bind camera controller to lifecycle
         viewModel.cameraController.bindToLifecycle(this)
@@ -1613,41 +1672,8 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         lifecycleScope.launch {
             viewModel.cameraController.initializationFuture.await()
 
-            val camera2CameraControl = viewModel.cameraController.camera2CameraControl ?: run {
-                Log.wtf(LOG_TAG, "Camera2CameraControl not available even with camera ready?")
-                return@launch
-            }
-
-            val camera2Options = cameraConfiguration.camera2Options
-
             // Set Camera2 CaptureRequest options
-            camera2CameraControl.setCaptureRequestOptions(CaptureRequestOptions.Builder()
-                .setFrameRate(
-                    when (cameraConfiguration) {
-                        is CameraConfiguration.Video -> cameraConfiguration.videoFrameRate
-                        else -> null
-                    }
-                )
-                .setVideoStabilizationMode(
-                    when (cameraConfiguration) {
-                        is CameraConfiguration.Video -> when (
-                            cameraConfiguration.enableVideoStabilization
-                        ) {
-                            true -> VideoStabilizationMode.getMode(cameraConfiguration.camera)
-                            false -> null
-                        }
-
-                        else -> null
-                    } ?: VideoStabilizationMode.OFF
-                )
-                .setEdgeMode(camera2Options.edgeMode)
-                .setNoiseReductionMode(camera2Options.noiseReductionMode)
-                .setShadingMode(camera2Options.shadingMode)
-                .setColorCorrectionAberrationMode(camera2Options.colorCorrectionAberrationMode)
-                .setDistortionCorrectionMode(camera2Options.distortionCorrectionMode)
-                .setHotPixelMode(camera2Options.hotPixelMode)
-                .build()
-            )
+            viewModel.applyCamera2CaptureRequestOptions(cameraConfiguration)
         }
 
         // Restore settings that can be set on the fly
@@ -1934,6 +1960,13 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         }
     }
 
+    private fun setManualFocusControlsVisible(visible: Boolean) {
+        val supported = viewModel.camera.replayCache.lastOrNull()?.supportsManualFocus == true
+        val locked = viewModel.isManualFocusLocked.value
+        focusLevel.isVisible = visible && supported
+        manualFocusUnlockButton.isVisible = visible && supported && locked
+    }
+
     private fun handleHardwareKeyDown(
         keyCode: Int, event: KeyEvent?
     ) = HardwareKey.match(keyCode)?.let { (hardwareKey, tempIncrease) ->
@@ -2068,6 +2101,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         private const val MSG_HIDE_FOCUS_RING = 1
         private const val MSG_HIDE_EXPOSURE_SLIDER = 2
         private const val MSG_ON_PINCH_TO_ZOOM = 3
+        private const val MSG_HIDE_FOCUS_SLIDER = 4
 
         // We need to return something small enough so as not to overwhelm Binder. 1MB is the
         // per-process limit across all transactions. Camera2 sets a max pixel count of 51200.

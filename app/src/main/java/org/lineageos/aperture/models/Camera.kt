@@ -5,7 +5,9 @@
 
 package org.lineageos.aperture.models
 
+import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.os.Build
 import androidx.annotation.OptIn
@@ -40,6 +42,7 @@ class Camera private constructor(
     val logicalZoomRatios: SortedMap<Float, Float>,
     additionalVideoFrameRates: Map<Quality, Map<FrameRate, Boolean>>,
     val supportedExtensionModes: Set<Int>,
+    val physicalFocusDistanceRanges: Map<String, FocusDistanceRange>,
 ) {
     /**
      * The [androidx.camera.core.CameraSelector] for this camera.
@@ -71,6 +74,25 @@ class Camera private constructor(
         cameraInfo.exposureState.exposureCompensationRange.toClosedRange<Int>()
 
     val intrinsicZoomRatio = cameraInfo.intrinsicZoomRatio
+
+    private val availableAfModes = camera2CameraInfo.getCameraCharacteristic(
+        CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES
+    ) ?: IntArray(0)
+
+    /**
+     * Camera2 reports manual focus distance in diopters. 0 means infinity.
+     */
+    val maximumFocusDistance = camera2CameraInfo.getCameraCharacteristic(
+        CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE
+    ) ?: 0f
+
+    val maximumPhysicalFocusDistance = physicalFocusDistanceRanges.values
+        .maxOfOrNull { it.maximumDistance }
+        ?.takeIf { it > 0f }
+        ?: maximumFocusDistance
+
+    val supportsManualFocus = maximumPhysicalFocusDistance > 0f &&
+            availableAfModes.contains(CameraMetadata.CONTROL_AF_MODE_OFF)
 
     private val imageCaptureCapabilities = ImageCapture.getImageCaptureCapabilities(cameraInfo)
 
@@ -278,6 +300,7 @@ class Camera private constructor(
 
     companion object {
         fun fromCameraX(
+            context: Context,
             cameraXCameraInfo: CameraInfo,
             extensionsManager: ExtensionsManager,
             overlaysRepository: OverlaysRepository,
@@ -301,7 +324,39 @@ class Camera private constructor(
                 logicalZoomRatios,
                 additionalVideoFrameRates,
                 supportedExtensionModes,
+                getPhysicalFocusDistanceRanges(context, cameraId),
             )
         }
+
+        private fun getPhysicalFocusDistanceRanges(
+            context: Context,
+            cameraId: String,
+        ): Map<String, FocusDistanceRange> {
+            val cameraManager = context.getSystemService(CameraManager::class.java)
+            val logicalCharacteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val physicalCameraIds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                logicalCharacteristics.physicalCameraIds
+            } else {
+                emptySet()
+            }
+
+            return buildMap {
+                put(cameraId, logicalCharacteristics.toFocusDistanceRange(cameraId))
+                physicalCameraIds.forEach { physicalCameraId ->
+                    put(
+                        physicalCameraId,
+                        cameraManager.getCameraCharacteristics(physicalCameraId)
+                            .toFocusDistanceRange(physicalCameraId)
+                    )
+                }
+            }
+        }
+
+        private fun CameraCharacteristics.toFocusDistanceRange(
+            cameraId: String,
+        ) = FocusDistanceRange(
+            cameraId,
+            get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
+        )
     }
 }

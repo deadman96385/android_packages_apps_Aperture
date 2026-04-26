@@ -101,6 +101,36 @@
         app:trackColor="#7FCCCCCC" />
 
     <org.lineageos.aperture.ui.views.VerticalSlider
+        android:id="@+id/focusLevel"
+        android:layout_width="32dp"
+        android:layout_height="250dp"
+        android:layout_marginStart="8dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@+id/viewFinder"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="@+id/viewFinder"
+        app:thumbColor="@android:color/white"
+        app:thumbTextColor="@android:color/black"
+        app:thumbTextSize="10dp"
+        app:trackBorderColor="#a9a7aa"
+        app:trackColor="#7FCCCCCC" />
+
+    <ImageButton
+        android:id="@+id/manualFocusUnlockButton"
+        style="@style/Theme.Aperture.Camera.SecondaryBottomBarButton"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginTop="8dp"
+        android:contentDescription="@string/manual_focus_unlock_button_description"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@+id/viewFinder"
+        app:layout_constraintEnd_toEndOf="@+id/focusLevel"
+        app:layout_constraintStart_toStartOf="@+id/focusLevel"
+        app:layout_constraintTop_toBottomOf="@+id/focusLevel"
+        app:layout_constraintVertical_bias="0"
+        app:srcCompat="@drawable/ic_lock_open" />
+
+    <org.lineageos.aperture.ui.views.VerticalSlider
         android:id="@+id/exposureLevel"
         android:layout_width="32dp"
         android:layout_height="250dp"
