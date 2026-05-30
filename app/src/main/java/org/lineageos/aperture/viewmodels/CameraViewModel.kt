@@ -78,6 +78,7 @@ import org.lineageos.aperture.ext.previousPowerOfTwo
 import org.lineageos.aperture.ext.setColorCorrectionAberrationMode
 import org.lineageos.aperture.ext.setDistortionCorrectionMode
 import org.lineageos.aperture.ext.setEdgeMode
+import org.lineageos.aperture.ext.setFlashMode
 import org.lineageos.aperture.ext.setFrameRate
 import org.lineageos.aperture.ext.setHotPixelMode
 import org.lineageos.aperture.ext.setManualFocusAfMode
@@ -371,6 +372,38 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
      * Whether QR torch mode should be enabled.
      */
     private val qrFlashMode = MutableStateFlow(FlashMode.OFF)
+
+    /**
+     * Maximum torch strength level supported by the current camera.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val torchStrengthMaxLevel = camera
+        .mapLatest { it.torchStrengthMaxLevel }
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            viewModelScope,
+            started = SharingStarted.WhileSubscribed(),
+            initialValue = 1,
+        )
+
+    /**
+     * Whether the current camera reports more than one torch strength level.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val supportsVariableTorchStrength = camera
+        .mapLatest { it.supportsVariableTorchStrength }
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            viewModelScope,
+            started = SharingStarted.WhileSubscribed(),
+            initialValue = false,
+        )
+
+    /**
+     * Current torch strength (1..[torchStrengthMaxLevel]). null when the torch strength slider
+     * is not active and the regular flash mode pipeline is in charge.
+     */
+    val torchStrength = MutableStateFlow<Int?>(null)
 
     /**
      * The user selected flash mode.
@@ -1032,9 +1065,28 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
     init {
         viewModelScope.launch {
             launch {
-                flashMode.collectLatest { flashMode ->
-                    cameraController.flashMode = flashMode
+                combine(flashMode, cameraConfiguration) { flashMode, cameraConfiguration ->
+                    flashMode to cameraConfiguration
+                }.collectLatest { (flashMode, cameraConfiguration) ->
+                    cameraController.setFlashMode(
+                        flashMode,
+                        updateImageCaptureFlashMode = cameraConfiguration is CameraConfiguration.Photo,
+                    )
+                    if (flashMode != FlashMode.TORCH) {
+                        torchStrength.value = null
+                    }
                 }
+            }
+
+            launch {
+                combine(
+                    torchStrength,
+                    flashMode,
+                    cameraConfiguration,
+                ) { _, _, cameraConfiguration -> cameraConfiguration }
+                    .collectLatest { cameraConfiguration ->
+                        applyTorchStrengthLevel(cameraConfiguration)
+                    }
             }
 
             launch {
@@ -1485,6 +1537,69 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
     }
 
     /**
+     * Drive the torch strength from a slider gesture.
+     *
+     * @param level 0 = restore the user's non-torch flash mode (i.e. turn the torch off and fall
+     *   back to whatever flash mode was selected before). 1..max = enable torch and request that
+     *   strength level.
+     */
+    fun setTorchStrengthFromSlider(level: Int) {
+        val cameraConfiguration = _cameraConfiguration.value ?: return
+        val maxLevel = torchStrengthMaxLevel.value
+
+        if (level <= 0) {
+            restoreNonTorchFlashMode(cameraConfiguration.cameraMode)
+            return
+        }
+
+        val clampedLevel = level.coerceIn(1, maxLevel)
+        if (!cameraConfiguration.camera.supportedFlashModes.contains(FlashMode.TORCH)) {
+            return
+        }
+
+        when (cameraConfiguration.cameraMode) {
+            CameraMode.PHOTO -> {
+                forceTorch.value = true
+            }
+
+            CameraMode.VIDEO -> {
+                preferencesRepository.videoFlashMode.value = FlashMode.TORCH
+            }
+
+            CameraMode.QR -> {
+                qrFlashMode.value = FlashMode.TORCH
+            }
+        }
+
+        torchStrength.value = clampedLevel
+    }
+
+    /**
+     * Turn off torch mode and fall back to the user's previously selected non-torch flash mode.
+     */
+    private fun restoreNonTorchFlashMode(cameraMode: CameraMode) {
+        torchStrength.value = null
+
+        when (cameraMode) {
+            CameraMode.PHOTO -> {
+                forceTorch.value = false
+            }
+
+            CameraMode.VIDEO -> {
+                if (preferencesRepository.videoFlashMode.value == FlashMode.TORCH) {
+                    preferencesRepository.videoFlashMode.value = FlashMode.OFF
+                }
+            }
+
+            CameraMode.QR -> {
+                if (qrFlashMode.value == FlashMode.TORCH) {
+                    qrFlashMode.value = FlashMode.OFF
+                }
+            }
+        }
+    }
+
+    /**
      * Cycle to the next grid mode.
      */
     fun cycleGridMode() {
@@ -1729,6 +1844,14 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
 
         activePhysicalCameraId.value = supportedActivePhysicalId
         clampManualFocusToActiveRange()
+    }
+
+    fun applyTorchStrengthLevel(cameraConfiguration: CameraConfiguration) {
+        val strength = torchStrength.value?.takeIf {
+            flashMode.value == FlashMode.TORCH && cameraConfiguration.camera.supportsVariableTorchStrength
+        }?.coerceIn(1, cameraConfiguration.camera.torchStrengthMaxLevel) ?: return
+
+        cameraController.cameraControl?.setTorchStrengthLevel(strength)
     }
 
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)

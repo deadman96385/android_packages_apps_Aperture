@@ -23,8 +23,21 @@ var CameraController.flashMode: FlashMode
         }
     }
     set(value) {
-        enableTorch(value == FlashMode.TORCH)
+        setFlashMode(value, true)
+    }
 
+fun CameraController.setFlashMode(
+    value: FlashMode,
+    updateImageCaptureFlashMode: Boolean,
+) {
+    enableTorch(value == FlashMode.TORCH)
+
+    // Only touch imageCaptureFlashMode when an ImageCapture use case is actually in the active
+    // SessionConfig. Video/QR sessions (and the brief pre-bind window at startup) bind only
+    // Preview + (VideoCapture | ImageAnalysis), and setImageCaptureFlashMode would throw
+    // IllegalStateException there. Skipping the write is safe — when we later rebind into a
+    // photo session, the ViewModel's flashMode flow re-emits and we'll apply it then.
+    if (updateImageCaptureFlashMode && isImageCaptureEnabled) {
         imageCaptureFlashMode = when (value) {
             FlashMode.OFF -> ImageCapture.FLASH_MODE_OFF
             FlashMode.AUTO -> ImageCapture.FLASH_MODE_AUTO
@@ -33,6 +46,7 @@ var CameraController.flashMode: FlashMode
             FlashMode.SCREEN -> ImageCapture.FLASH_MODE_SCREEN
         }
     }
+}
 
 val CameraController.camera2CameraControl: Camera2CameraControl?
     @androidx.camera.camera2.interop.ExperimentalCamera2Interop

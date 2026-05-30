@@ -148,6 +148,48 @@
         app:trackColorGradientEnd="#242424"
         app:trackColorGradientStart="#8d9299" />
 
+    <org.lineageos.aperture.ui.views.VerticalSlider
+        android:id="@+id/flashStrengthLevel"
+        android:layout_width="32dp"
+        android:layout_height="250dp"
+        android:layout_marginEnd="48dp"
+        android:layout_marginBottom="8dp"
+        android:contentDescription="@string/flash_strength_slider_description"
+        android:visibility="invisible"
+        app:layout_constraintBottom_toTopOf="@+id/secondaryBottomBarLayout"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:thumbColor="@android:color/white"
+        app:thumbTextColor="@android:color/black"
+        app:thumbTextSize="10dp"
+        app:trackBorderColor="#a9a7aa"
+        app:trackColor="#7FCCCCCC" />
+
+    <ImageView
+        android:id="@+id/flashStrengthHint"
+        android:layout_width="16dp"
+        android:layout_height="16dp"
+        android:layout_marginEnd="56dp"
+        android:layout_marginTop="4dp"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="@+id/secondaryBottomBarLayout"
+        app:srcCompat="@drawable/ic_chevron_up"
+        app:tint="@android:color/white"
+        tools:ignore="ContentDescription" />
+
+    <ImageView
+        android:id="@+id/flashStrengthDownHint"
+        android:layout_width="16dp"
+        android:layout_height="16dp"
+        android:layout_marginEnd="56dp"
+        android:rotation="180"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/flashStrengthHint"
+        app:srcCompat="@drawable/ic_chevron_up"
+        app:tint="@android:color/white"
+        tools:ignore="ContentDescription" />
+
     <HorizontalScrollView
         android:id="@+id/secondaryTopBarLayout"
         android:layout_width="0dp"

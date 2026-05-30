@@ -12,6 +12,8 @@
     <string name="cancel_button_description">Cancel</string>
     <string name="confirm_button_description">Confirm</string>
     <string name="flash_button_description">Flash mode</string>
+    <string name="flash_strength_slider_description">Torch strength</string>
+    <string name="flash_strength_off">Off</string>
     <string name="flip_camera_button_description">Flip camera</string>
     <string name="gallery_button_description">Gallery</string>
     <string name="google_lens_button_description">Open Google Lens</string>

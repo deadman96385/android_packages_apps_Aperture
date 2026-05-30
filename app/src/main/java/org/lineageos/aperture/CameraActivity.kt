@@ -6,6 +6,7 @@
 package org.lineageos.aperture
 
 import android.animation.ValueAnimator
+import android.annotation.SuppressLint
 import android.app.KeyguardManager
 import android.content.ClipData
 import android.content.Intent
@@ -27,6 +28,8 @@ import android.util.Log
 import android.view.GestureDetector
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
@@ -83,6 +86,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -136,6 +140,7 @@ import java.io.ByteArrayInputStream
 import java.io.FileNotFoundException
 import java.io.InputStream
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.reflect.safeCast
 import androidx.camera.core.CameraState as CameraXCameraState
 
@@ -152,6 +157,9 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
     private val effectButton by lazy { findViewById<Button>(R.id.effectButton) }
     private val exposureLevel by lazy { findViewById<VerticalSlider>(R.id.exposureLevel) }
     private val flashButton by lazy { findViewById<ImageButton>(R.id.flashButton) }
+    private val flashStrengthLevel by lazy { findViewById<VerticalSlider>(R.id.flashStrengthLevel) }
+    private val flashStrengthHint by lazy { findViewById<ImageView>(R.id.flashStrengthHint) }
+    private val flashStrengthDownHint by lazy { findViewById<ImageView>(R.id.flashStrengthDownHint) }
     private val flipCameraButton by lazy { findViewById<ImageButton>(R.id.flipCameraButton) }
     private val galleryButtonCardView by lazy { findViewById<CardView>(R.id.galleryButtonCardView) }
     private val galleryButtonIconImageView by lazy { findViewById<ImageView>(R.id.galleryButtonIconImageView) }
@@ -269,6 +277,10 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                 MSG_HIDE_FOCUS_SLIDER -> {
                     setManualFocusControlsVisible(false)
                 }
+
+                MSG_HIDE_TORCH_STRENGTH_SLIDER -> {
+                    setFlashStrengthSliderActive(false)
+                }
             }
         }
     }
@@ -291,6 +303,24 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                 }
             }
         }
+    }
+
+    // Flash strength swipe-up gesture state
+    private var flashGestureStartY = 0f
+    private var flashGestureInSliderMode = false
+    private var flashGestureLongPressFired = false
+    // Anchor captured at the moment slider mode is entered — the level changes incrementally
+    // from anchor level by how far the finger has moved relative to anchor Y. This lets
+    // repeated swipes nudge the brightness up/down from wherever the previous one left it,
+    // instead of jumping back to wherever the absolute finger position maps to.
+    private var flashGestureAnchorY = 0f
+    private var flashGestureAnchorLevel = 0
+    private val flashGestureTouchSlop by lazy {
+        ViewConfiguration.get(this).scaledTouchSlop.toFloat()
+    }
+    private val flashGestureLongPressRunnable = Runnable {
+        flashGestureLongPressFired = true
+        flashButton.performLongClick()
     }
 
     private val forceTorchSnackbar by lazy {
@@ -448,6 +478,33 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         }
         flashButton.setOnClickListener { viewModel.cycleFlashMode(false) }
         flashButton.setOnLongClickListener { viewModel.cycleFlashMode(true) }
+        setupFlashStrengthGesture()
+
+        flashStrengthLevel.onProgressChangedByUser = { progress ->
+            val max = viewModel.torchStrengthMaxLevel.value
+            if (max > 1) {
+                val level = Int.mapToRange(0..max, progress)
+                viewModel.setTorchStrengthFromSlider(level)
+                handler.removeMessages(MSG_HIDE_TORCH_STRENGTH_SLIDER)
+                handler.sendMessageDelayed(
+                    handler.obtainMessage(MSG_HIDE_TORCH_STRENGTH_SLIDER),
+                    2000
+                )
+            }
+        }
+        flashStrengthLevel.textFormatter = { progress ->
+            val max = viewModel.torchStrengthMaxLevel.value
+            if (max > 1) {
+                val level = Int.mapToRange(0..max, progress)
+                if (level == 0) {
+                    getString(R.string.flash_strength_off)
+                } else {
+                    level.toString()
+                }
+            } else {
+                ""
+            }
+        }
 
         // Observe manual focus
         viewFinder.setOnTouchListener { _, event ->
@@ -909,8 +966,11 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                 // Rotate sliders
                 exposureLevel.screenRotation = screenRotation
                 focusLevel.screenRotation = screenRotation
+                flashStrengthLevel.screenRotation = screenRotation
                 zoomLevel.screenRotation = screenRotation
                 manualFocusUnlockButton.smoothRotate(compensationValue)
+                flashStrengthHint.smoothRotate(compensationValue)
+                flashStrengthDownHint.smoothRotate(compensationValue + 180f)
 
                 // Rotate info chip
                 islandView.setScreenRotation(screenRotation)
@@ -971,6 +1031,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
                 // we want the user to know if any other mode is being used
                 flashButton.isVisible = supportedFlashModes.size != 1
                         || supportedFlashModes.first() != FlashMode.OFF
+                updateFlashStrengthHintVisibility()
             }
         }
 
@@ -992,7 +1053,39 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         launch {
             viewModel.isFlashButtonEnabled.collectLatest { isFlashButtonEnabled ->
                 flashButton.isEnabled = isFlashButtonEnabled
+                updateFlashStrengthHintVisibility()
             }
+        }
+
+        launch {
+            viewModel.torchStrengthMaxLevel.collectLatest { max ->
+                flashStrengthLevel.steps = max.coerceAtLeast(0)
+            }
+        }
+
+        launch {
+            viewModel.supportsVariableTorchStrength.collectLatest { _ ->
+                handler.removeMessages(MSG_HIDE_TORCH_STRENGTH_SLIDER)
+                setFlashStrengthSliderActive(false)
+            }
+        }
+
+        launch {
+            combine(
+                viewModel.torchStrength,
+                viewModel.flashMode,
+            ) { strength, mode -> strength to mode }
+                .collectLatest { (strength, mode) ->
+                    // Reflect on slider thumb when the strength changes from elsewhere.
+                    val max = viewModel.torchStrengthMaxLevel.value
+                    if (max > 1) {
+                        flashStrengthLevel.progress = when (strength) {
+                            null, 0 -> 0f
+                            else -> strength.toFloat() / max
+                        }
+                    }
+                    updateFlashStrengthHintVisibility()
+                }
         }
 
         launch {
@@ -1654,7 +1747,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         // Workaround: We cannot set flash mode to screen with a non front facing camera.
         // VM will set the correct value later on
         if (cameraConfiguration.camera.cameraFacing != CameraFacing.FRONT
-            && viewModel.cameraController.flashMode == FlashMode.SCREEN
+            && viewModel.flashMode.value == FlashMode.SCREEN
         ) {
             viewModel.cameraController.flashMode = FlashMode.OFF
         }
@@ -1674,6 +1767,13 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
 
             // Set Camera2 CaptureRequest options
             viewModel.applyCamera2CaptureRequestOptions(cameraConfiguration)
+
+            // Re-assert flash mode on the fresh session. The flashMode StateFlow has the same
+            // value as before the rebind, so the regular collector wouldn't fire — but the new
+            // CameraController session starts with the torch off. Without this, a saved
+            // videoFlashMode == TORCH would leave the icon showing torch while the hardware
+            // stays dark.
+            viewModel.cameraController.flashMode = viewModel.flashMode.value
         }
 
         // Restore settings that can be set on the fly
@@ -1967,6 +2067,134 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         manualFocusUnlockButton.isVisible = visible && supported && locked
     }
 
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupFlashStrengthGesture() {
+        flashButton.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    flashGestureStartY = event.y
+                    flashGestureInSliderMode = false
+                    flashGestureLongPressFired = false
+                    handler.postDelayed(
+                        flashGestureLongPressRunnable,
+                        ViewConfiguration.getLongPressTimeout().toLong()
+                    )
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    if (!flashGestureInSliderMode) {
+                        val dy = flashGestureStartY - event.y
+                        val canAdjustDown = (viewModel.torchStrength.value ?: 0) > 0
+                        val crossedSlop = dy > flashGestureTouchSlop ||
+                                (canAdjustDown && -dy > flashGestureTouchSlop)
+                        if (crossedSlop && canEnterFlashStrengthSlider()) {
+                            flashGestureInSliderMode = true
+                            handler.removeCallbacks(flashGestureLongPressRunnable)
+                            // Anchor the incremental mapping at the point where the gesture is
+                            // recognised, against the current torch level. Without this each
+                            // re-engagement would snap the brightness back to wherever the
+                            // finger's absolute Y mapped to.
+                            flashGestureAnchorY = event.y
+                            flashGestureAnchorLevel = viewModel.torchStrength.value ?: 0
+                            setFlashStrengthSliderActive(true)
+                        }
+                    }
+                    if (flashGestureInSliderMode) {
+                        updateFlashStrengthFromFinger(event.y)
+                    }
+                    true
+                }
+
+                MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(flashGestureLongPressRunnable)
+                    if (flashGestureInSliderMode) {
+                        updateFlashStrengthFromFinger(event.y)
+                        handler.removeMessages(MSG_HIDE_TORCH_STRENGTH_SLIDER)
+                        handler.sendMessageDelayed(
+                            handler.obtainMessage(MSG_HIDE_TORCH_STRENGTH_SLIDER),
+                            2000
+                        )
+                    } else if (!flashGestureLongPressFired) {
+                        v.performClick()
+                    }
+                    flashGestureInSliderMode = false
+                    true
+                }
+
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(flashGestureLongPressRunnable)
+                    if (flashGestureInSliderMode) {
+                        handler.removeMessages(MSG_HIDE_TORCH_STRENGTH_SLIDER)
+                        handler.sendMessageDelayed(
+                            handler.obtainMessage(MSG_HIDE_TORCH_STRENGTH_SLIDER),
+                            2000
+                        )
+                    }
+                    flashGestureInSliderMode = false
+                    true
+                }
+
+                else -> false
+            }
+        }
+    }
+
+    private fun canEnterFlashStrengthSlider(): Boolean {
+        if (!viewModel.supportsVariableTorchStrength.value) return false
+        if (!viewModel.isFlashButtonEnabled.value) return false
+        val camera = viewModel.camera.replayCache.lastOrNull() ?: return false
+        return camera.supportedFlashModes.contains(FlashMode.TORCH)
+    }
+
+    /**
+     * Incremental level adjustment from the gesture anchor: the level changes by how far the
+     * finger has moved since slider mode was entered, scaled so a full slider-height swipe
+     * spans the entire [0, max] range. Re-engaging the gesture continues from the current
+     * torch level rather than jumping to an absolute position.
+     */
+    private fun updateFlashStrengthFromFinger(eventY: Float) {
+        val max = viewModel.torchStrengthMaxLevel.value
+        if (max <= 1) return
+
+        val sliderHeight = flashStrengthLevel.height.takeIf { it > 0 }
+            ?: flashStrengthLevel.layoutParams.height.takeIf { it > 0 }
+            ?: return
+
+        val deltaY = flashGestureAnchorY - eventY  // positive = moved up
+        val deltaLevels = (deltaY * max / sliderHeight).roundToInt()
+        val newLevel = (flashGestureAnchorLevel + deltaLevels).coerceIn(0, max)
+
+        flashStrengthLevel.progress = newLevel.toFloat() / max
+        viewModel.setTorchStrengthFromSlider(newLevel)
+    }
+
+    /**
+     * Toggle the torch strength slider between active (VISIBLE), idle (INVISIBLE — still laid
+     * out so the gesture handler can read its position), and unsupported (GONE).
+     */
+    private fun setFlashStrengthSliderActive(active: Boolean) {
+        flashStrengthLevel.visibility = when {
+            active -> View.VISIBLE
+            viewModel.supportsVariableTorchStrength.value -> View.INVISIBLE
+            else -> View.GONE
+        }
+        updateFlashStrengthHintVisibility()
+    }
+
+    private fun updateFlashStrengthHintVisibility() {
+        val supports = viewModel.supportsVariableTorchStrength.value
+        val enabled = viewModel.isFlashButtonEnabled.value
+        val torchAvailable = viewModel.supportedFlashModes.value.contains(FlashMode.TORCH)
+                || viewModel.camera.replayCache.lastOrNull()
+                    ?.supportedFlashModes?.contains(FlashMode.TORCH) == true
+        val sliderActive = flashStrengthLevel.visibility == View.VISIBLE
+        val canShowHint = supports && enabled && torchAvailable && flashButton.isVisible &&
+                !sliderActive
+        flashStrengthHint.isVisible = canShowHint
+        flashStrengthDownHint.isVisible = canShowHint && (viewModel.torchStrength.value ?: 0) > 0
+    }
+
     private fun handleHardwareKeyDown(
         keyCode: Int, event: KeyEvent?
     ) = HardwareKey.match(keyCode)?.let { (hardwareKey, tempIncrease) ->
@@ -2102,6 +2330,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         private const val MSG_HIDE_EXPOSURE_SLIDER = 2
         private const val MSG_ON_PINCH_TO_ZOOM = 3
         private const val MSG_HIDE_FOCUS_SLIDER = 4
+        private const val MSG_HIDE_TORCH_STRENGTH_SLIDER = 5
 
         // We need to return something small enough so as not to overwhelm Binder. 1MB is the
         // per-process limit across all transactions. Camera2 sets a max pixel count of 51200.

@@ -274,6 +274,33 @@ class Camera private constructor(
         }
     }
 
+    /**
+     * Maximum torch strength level reported for active camera sessions.
+     * 1 means the device only supports a single strength (i.e. no variable control).
+     */
+    val torchStrengthMaxLevel: Int = if (cameraInfo.hasFlashUnit()) {
+        camera2CameraInfo.getCameraCharacteristic(
+            CameraCharacteristics.FLASH_TORCH_STRENGTH_MAX_LEVEL
+        ) ?: 1
+    } else {
+        1
+    }
+
+    /**
+     * Default torch strength level reported for active camera sessions.
+     * Used as the starting brightness when the user has not yet picked a level.
+     */
+    val torchStrengthDefaultLevel: Int = if (cameraInfo.hasFlashUnit()) {
+        camera2CameraInfo.getCameraCharacteristic(
+            CameraCharacteristics.FLASH_TORCH_STRENGTH_DEFAULT_LEVEL
+        ) ?: 1
+    } else {
+        1
+    }
+
+    val supportsVariableTorchStrength: Boolean
+        get() = torchStrengthMaxLevel > 1
+
     override fun equals(other: Any?) = this::class.safeCast(other)?.let {
         this.cameraId == it.cameraId
     } ?: false
