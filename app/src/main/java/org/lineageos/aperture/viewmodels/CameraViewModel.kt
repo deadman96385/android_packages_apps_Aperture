@@ -1537,6 +1537,23 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
     }
 
     /**
+     * Drop session-only torch state when the camera UI is leaving the foreground.
+     *
+     * Some devices force the torch off when the camera session tears down on app background and
+     * refuse to bring it back on the next rebind. Without this reset, [forceTorch] / [qrFlashMode]
+     * / [torchStrength] would stay set across the trip — the icon would lie about the torch being
+     * on while the hardware stayed dark. Persistent preferences (photo/video flash mode) are
+     * intentionally left alone.
+     */
+    fun onSessionStopped() {
+        forceTorch.value = false
+        if (qrFlashMode.value == FlashMode.TORCH) {
+            qrFlashMode.value = FlashMode.OFF
+        }
+        torchStrength.value = null
+    }
+
+    /**
      * Drive the torch strength from a slider gesture.
      *
      * @param level 0 = restore the user's non-torch flash mode (i.e. turn the torch off and fall

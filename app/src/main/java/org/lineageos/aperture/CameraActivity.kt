@@ -705,6 +705,13 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
         }
     }
 
+    override fun onStop() {
+        // Drop session-only torch state — hardware torch doesn't survive backgrounding on most
+        // devices, and we don't want the icon to lie about it on return.
+        viewModel.onSessionStopped()
+        super.onStop()
+    }
+
     override fun onDestroy() {
         // Detach CameraController from ScreenFlashView
         screenFlashView.setController(null)
